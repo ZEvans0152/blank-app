@@ -2,3 +2,8 @@ pandas
 numpy
 scikit-learn
 streamlit
+
+# stock_alert_bot
+yfinance>=0.2.40
+requests>=2.31
+tzdata; platform_system == "Windows"
