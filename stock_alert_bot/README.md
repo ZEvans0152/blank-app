@@ -76,7 +76,8 @@ stocks are only scanned during US market hours (configurable).
 | `/watch AAPL BTC-USD` | add symbols to your watchlist |
 | `/unwatch TSLA` | remove symbols |
 | `/watchlist` | show your watchlist |
-| `/check NVDA` | full indicator report for one symbol, right now |
+| `/check NVDA` | quick signal check for one symbol, right now |
+| `/full NVDA` | deep multi-timeframe report: trend posture, momentum, volatility, volume, pivot levels, 52-week position, and the intraday signal-engine verdict |
 | `/scan` | scan your whole watchlist immediately |
 | `/mute` / `/unmute` | pause / resume alerts |
 | `/settings` | show scanner configuration |
@@ -96,6 +97,32 @@ All via environment variables (or `.env`) — see `.env.example` for the full
 list: scan interval, candle size, score thresholds, cooldown, default
 watchlist, market-hours behavior, and state-file location. Chat subscriptions,
 watchlists, and cooldowns persist in a local JSON state file across restarts.
+
+## Running 24/7
+
+The bot is a single long-running process — put it on any always-on machine
+(home server, Raspberry Pi, a ~$5/mo VPS, or a container platform like
+Fly.io/Railway).
+
+**Docker (recommended):**
+
+```
+cp .env.example .env        # set TELEGRAM_BOT_TOKEN (and ALERT_CHAT_IDS)
+docker compose up -d --build
+docker compose logs -f      # watch it run
+```
+
+State (subscriptions, watchlists, cooldowns) persists in `./data/` across
+restarts and upgrades. `restart: unless-stopped` brings the bot back after
+crashes and reboots.
+
+**systemd (bare Linux, no Docker):** see `deploy/stock-alert-bot.service` —
+copy it into `/etc/systemd/system/`, adjust the paths, then
+`systemctl enable --now stock-alert-bot`.
+
+Tip: set `ALERT_CHAT_IDS` to your chat id so a rebuilt deployment starts
+alerting you immediately even with a blank state volume, and set
+`ALLOWED_CHAT_IDS` to the same value to keep the bot private.
 
 ## Tests
 

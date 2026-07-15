@@ -1,0 +1,7 @@
+# Dependencies for the bot alone (the repo-root requirements.txt also carries
+# the unrelated Streamlit app's packages).
+pandas
+numpy
+yfinance>=0.2.40
+requests>=2.31
+tzdata; platform_system == "Windows"

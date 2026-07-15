@@ -17,6 +17,7 @@ from . import __version__
 from .config import Config
 from .formatting import format_alert, format_analysis
 from .market_data import fetch_ohlcv, is_always_open, is_valid_symbol
+from .report import build_full_report
 from .signals import Analysis, analyze
 from .state import State
 from .telegram_api import TelegramAPI, TelegramError
@@ -27,7 +28,8 @@ HELP_TEXT = """<b>Commands</b>
 /watch SYMBOL [SYMBOL…] — add symbols to your watchlist
 /unwatch SYMBOL [SYMBOL…] — remove symbols
 /watchlist — show your watchlist
-/check SYMBOL — full technical analysis right now
+/check SYMBOL — quick signal check right now
+/full SYMBOL — deep multi-timeframe technical analysis
 /scan — scan your whole watchlist right now
 /mute · /unmute — pause/resume alerts
 /settings — show scanner configuration
@@ -51,6 +53,12 @@ class Bot:
         self.tg = TelegramAPI(cfg.telegram_token)
         self.state = State(cfg.state_file)
         self._next_scan_at = 0.0  # first scan runs immediately
+        # Seed chats from ALERT_CHAT_IDS so a fresh deployment (empty state
+        # file) starts alerting known chats without waiting for /start.
+        if cfg.alert_chat_ids:
+            for chat_id in cfg.alert_chat_ids:
+                self.state.ensure_chat(chat_id, cfg.default_watchlist)
+            self.state.save()
 
     # --- market hours -------------------------------------------------------
     @staticmethod
@@ -183,6 +191,8 @@ class Bot:
             self._reply(chat_id, f"<b>Watchlist</b>: {watchlist}")
         elif command == "/check":
             self._cmd_check(chat_id, args)
+        elif command == "/full":
+            self._cmd_full(chat_id, args)
         elif command == "/scan":
             self._cmd_scan(chat_id, chat)
         elif command == "/mute":
@@ -246,6 +256,26 @@ class Bot:
             )
             return
         self._reply(chat_id, format_analysis(analysis))
+
+    def _cmd_full(self, chat_id: int, args: list[str]) -> None:
+        if len(args) != 1 or not is_valid_symbol(args[0]):
+            self._reply(chat_id, "Usage: /full SYMBOL — e.g. /full NVDA")
+            return
+        symbol = args[0]
+        self._reply(chat_id, f"Running full analysis on {symbol}…")
+        try:
+            report = build_full_report(symbol, self.cfg)
+        except Exception:
+            log.exception("full report failed for %s", symbol)
+            report = None
+        if report is None:
+            self._reply(
+                chat_id,
+                f"Couldn't get enough data for {symbol}. Check the symbol "
+                "(Yahoo Finance notation) and try again.",
+            )
+            return
+        self._reply(chat_id, report)
 
     def _cmd_scan(self, chat_id: int, chat: dict) -> None:
         watchlist = chat.get("watchlist", [])

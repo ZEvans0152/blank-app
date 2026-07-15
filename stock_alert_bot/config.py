@@ -76,6 +76,10 @@ class Config:
     # If set, only these Telegram chat ids may use the bot.
     allowed_chat_ids: Optional[set[int]] = None
 
+    # Chats to auto-subscribe on startup (fresh deployments alert these chats
+    # immediately, no /start needed).
+    alert_chat_ids: list[int] = field(default_factory=list)
+
     state_file: str = ".stock_alert_bot_state.json"
 
     @classmethod
@@ -95,6 +99,9 @@ class Config:
 
         raw_watchlist = os.environ.get("DEFAULT_WATCHLIST", "").strip()
 
+        raw_alert = os.environ.get("ALERT_CHAT_IDS", "").strip()
+        alert_chat_ids = [int(x) for x in raw_alert.split(",") if x.strip()]
+
         return cls(
             telegram_token=token,
             scan_interval_minutes=_env_int("SCAN_INTERVAL_MINUTES", 15),
@@ -110,5 +117,6 @@ class Config:
                 else ["AAPL", "MSFT", "NVDA", "SPY", "TSLA"]
             ),
             allowed_chat_ids=allowed,
+            alert_chat_ids=alert_chat_ids,
             state_file=os.environ.get("STATE_FILE", ".stock_alert_bot_state.json"),
         )

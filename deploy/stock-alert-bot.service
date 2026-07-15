@@ -1,0 +1,22 @@
+# systemd unit for running the bot directly on a Linux box (no Docker).
+#
+#   sudo cp deploy/stock-alert-bot.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now stock-alert-bot
+#
+# Adjust WorkingDirectory/ExecStart paths to where you cloned the repo.
+
+[Unit]
+Description=Stock alert Telegram bot (technical-analysis signals)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/stock-alert-bot
+ExecStart=/usr/bin/python3 -m stock_alert_bot
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,7 @@
+services:
+  stock-alert-bot:
+    build: .
+    env_file: .env
+    restart: unless-stopped
+    volumes:
+      - ./data:/data
