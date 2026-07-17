@@ -1,4 +1,8 @@
 pandas
 numpy
-scikit-learn
 streamlit
+altair
+requests
+fastapi
+uvicorn
+pydantic
