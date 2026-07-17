@@ -39,6 +39,15 @@ Because a Telegram token was shared in chat, rotate it in BotFather before using
 ## Required before live trading
 
 - Multi-week paper-trading history with enough trades to evaluate drawdown, slippage assumptions, and strategy performance; the app now starts collecting that data in `paper_trading.db`.
+- Configurable risk policy with max trade size, daily loss limit, exposure cap, spread filter, liquidity filter, and consecutive-loss circuit breaker.
+- Simulated order execution with stop-loss, take-profit, and max-holding-time exits.
+- Dashboard metrics for total equity, realized P&L, unrealized P&L, win rate, open positions, and launch-readiness checks.
+- Tabs for equity curve, open positions, signal history, closed trades, risk policy, and live-trading readiness.
+- Live-trading mode placeholder with guarded warnings so API adapters can be added deliberately.
+
+## Required before live trading
+
+- Multi-week paper-trading history with enough trades to evaluate drawdown, slippage assumptions, and strategy performance.
 - Real Kalshi, Polymarket, and crypto market data adapters.
 - Venue-specific order execution adapters with dry-run and sandbox tests.
 - Telegram alerts, approvals, and kill switch connected to the execution layer.

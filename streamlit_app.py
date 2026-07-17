@@ -44,6 +44,8 @@ READINESS_REQUIREMENTS = [
         "requirement": "Paper trading has a statistically useful track record",
         "status": "In progress",
         "detail": "Signals and closed paper trades are now persisted to SQLite for review.",
+        "status": "Not met",
+        "detail": "No persistent backtest or multi-week paper-trading history exists yet.",
     },
     {
         "requirement": "Real Kalshi, Polymarket, and crypto market data adapters exist",
@@ -200,6 +202,9 @@ def generate_signal() -> dict:
             0.02,
             0.98,
         )
+    market_price = float(np.clip(np.random.normal(0.5, 0.16), 0.05, 0.95))
+    model_probability = float(
+        np.clip(market_price + np.random.normal(0.045, 0.055), 0.02, 0.98)
     )
     spread = float(np.random.uniform(0.005, 0.095))
     liquidity = float(np.random.lognormal(mean=8.2, sigma=0.75))
@@ -238,6 +243,26 @@ def current_unrealized_pnl() -> float:
 def readiness_summary() -> tuple[int, int]:
     unmet = sum(1 for item in READINESS_REQUIREMENTS if item["status"] != "Met")
     return len(READINESS_REQUIREMENTS) - unmet, unmet
+
+
+def total_equity() -> float:
+    return st.session_state.cash + sum(
+        position["stake"] + position["unrealized_pnl"]
+        for position in st.session_state.positions
+        if position["status"] == "open"
+    )
+
+
+def daily_realized_pnl() -> float:
+    cutoff = datetime.now(timezone.utc) - timedelta(days=1)
+    return sum(trade["pnl"] for trade in st.session_state.trades if trade["closed_at"] >= cutoff)
+
+
+def evaluate_signal(signal: dict, risk: RiskConfig) -> tuple[bool, str, float]:
+    open_positions = [p for p in st.session_state.positions if p["status"] == "open"]
+    open_exposure = sum(p["stake"] for p in open_positions)
+    equity = total_equity()
+
 
 
 def total_equity() -> float:
@@ -339,6 +364,19 @@ def close_position(position: dict, reason: str) -> None:
     }
     st.session_state.trades.append(trade)
     save_trade(trade)
+    st.session_state.trades.append(
+        {
+            "id": position["id"],
+            "platform": position["platform"],
+            "market": position["market"],
+            "side": position["side"],
+            "stake": position["stake"],
+            "pnl": pnl,
+            "roi": pnl / position["stake"],
+            "reason": reason,
+            "closed_at": datetime.now(timezone.utc),
+        }
+    )
     st.session_state.loss_streak = st.session_state.loss_streak + 1 if pnl < 0 else 0
 
 
@@ -354,6 +392,7 @@ def autonomous_cycle(risk: RiskConfig, scans: int) -> None:
         elif roi >= 0.28:
             close_position(position, "take profit")
         elif age_minutes >= 45 or position.get("holding_cycles", 0) >= 5:
+        elif age_minutes >= 45:
             close_position(position, "max holding time")
 
     for _ in range(scans):
@@ -434,6 +473,62 @@ metric_cols[0].metric(
     f"${total_equity():,.2f}",
     f"${total_equity() - risk.starting_bankroll:,.2f}",
 )
+)
+
+ready_count, unmet_count = readiness_summary()
+if unmet_count:
+    st.error(
+        "Not ready for live trading. "
+        f"{unmet_count} of {len(READINESS_REQUIREMENTS)} launch requirements are unmet."
+    )
+else:
+    st.success("All launch requirements are marked met. Keep small capital limits enabled.")
+
+with st.sidebar:
+    st.header("Autonomous Controls")
+    mode = st.selectbox("Execution mode", ["Paper trading", "Live trading - guarded"], index=0)
+    if mode.startswith("Live"):
+        st.warning(
+            "Live mode is blocked until the readiness checklist is complete and "
+            "venue-specific order adapters are implemented."
+        )
+    st.session_state.agent_running = st.toggle("Agent running", value=st.session_state.agent_running)
+    scans = st.slider("Signals per cycle", min_value=1, max_value=25, value=8)
+    risk = RiskConfig(
+        starting_bankroll=10_000,
+        max_trade_size=st.number_input("Max trade size ($)", 1.0, 5_000.0, 75.0, 5.0),
+        max_daily_loss=st.number_input("Daily loss limit ($)", 1.0, 5_000.0, 250.0, 10.0),
+        max_open_positions=st.number_input("Max open positions", 1, 100, 12, 1),
+        max_total_exposure_pct=st.slider("Max portfolio exposure (%)", 1, 100, 25),
+        min_edge_pct=st.slider("Minimum model edge (%)", 0.1, 25.0, 4.0, 0.1),
+        max_spread_pct=st.slider("Maximum spread (%)", 0.1, 25.0, 5.0, 0.1),
+        min_liquidity=st.number_input("Minimum liquidity ($)", 0.0, 1_000_000.0, 2_500.0, 250.0),
+        stop_after_losses=st.number_input("Stop after consecutive losses", 1, 20, 4, 1),
+    )
+    if st.button("Run autonomous cycle", type="primary"):
+        autonomous_cycle(risk, scans)
+    if st.button("Reset simulation"):
+        for key in ["trades", "signals", "positions"]:
+            st.session_state[key] = []
+        st.session_state.cash = risk.starting_bankroll
+        st.session_state.loss_streak = 0
+        st.session_state.equity = [{"time": datetime.now(timezone.utc), "equity": risk.starting_bankroll}]
+
+open_positions = [p for p in st.session_state.positions if p["status"] == "open"]
+realized_pnl = sum(t["pnl"] for t in st.session_state.trades)
+unrealized_pnl = current_unrealized_pnl()
+win_rate = (
+    sum(1 for t in st.session_state.trades if t["pnl"] > 0) / len(st.session_state.trades)
+    if st.session_state.trades
+    else 0
+)
+
+metric_cols = st.columns(6)
+metric_cols[0].metric(
+    "Total equity",
+    f"${total_equity():,.2f}",
+    f"${total_equity() - risk.starting_bankroll:,.2f}",
+)
 metric_cols[1].metric("Realized P&L", f"${realized_pnl:,.2f}")
 metric_cols[2].metric("Unrealized P&L", f"${unrealized_pnl:,.2f}")
 metric_cols[3].metric("Open positions", len(open_positions))
@@ -455,6 +550,8 @@ chart_tab, positions_tab, signals_tab, trades_tab, learning_tab, risk_tab, readi
         "Risk Policy",
         "Readiness",
     ]
+chart_tab, positions_tab, signals_tab, trades_tab, risk_tab, readiness_tab = st.tabs(
+    ["Equity", "Open Positions", "Signals", "Closed Trades", "Risk Policy", "Readiness"]
 )
 
 with chart_tab:
@@ -472,12 +569,21 @@ with positions_tab:
     if open_positions:
         st.dataframe(pd.DataFrame(open_positions), width="stretch", hide_index=True)
     else:
+        st.altair_chart(chart, use_container_width=True)
+    else:
+        st.write("Run an autonomous cycle to build the equity curve.")
+
+with positions_tab:
+    if open_positions:
+        st.dataframe(pd.DataFrame(open_positions), use_container_width=True, hide_index=True)
+    else:
         st.write("No open positions.")
 
 with signals_tab:
     if st.session_state.signals:
         signals_df = pd.DataFrame(st.session_state.signals).sort_values("time", ascending=False)
         st.dataframe(signals_df, width="stretch", hide_index=True)
+        st.dataframe(signals_df, use_container_width=True, hide_index=True)
     else:
         st.write("No signals yet.")
 
@@ -516,6 +622,11 @@ with learning_tab:
         st.write("No persisted signals yet.")
     else:
         st.dataframe(historical_signals, width="stretch", hide_index=True)
+    if st.session_state.trades:
+        trades_df = pd.DataFrame(st.session_state.trades).sort_values("closed_at", ascending=False)
+        st.dataframe(trades_df, use_container_width=True, hide_index=True)
+    else:
+        st.write("No closed trades yet.")
 
 with risk_tab:
     st.subheader("Autonomous Execution Guardrails")
@@ -536,6 +647,7 @@ with readiness_tab:
     st.warning("Do not fund or enable autonomous live trading until every item is met.")
     readiness_df = pd.DataFrame(READINESS_REQUIREMENTS)
     st.dataframe(readiness_df, width="stretch", hide_index=True)
+    st.dataframe(readiness_df, use_container_width=True, hide_index=True)
     st.markdown(
         """
         **Answer:** we are not ready to start live trading from this repo yet. The current
