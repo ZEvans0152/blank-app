@@ -3,3 +3,6 @@ numpy
 streamlit
 altair
 requests
+fastapi
+uvicorn
+pydantic

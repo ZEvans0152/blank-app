@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import random
+import sqlite3
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -24,6 +25,8 @@ class RiskConfig:
     stop_after_losses: int
 
 
+DB_PATH = "paper_trading.db"
+
 MARKET_TEMPLATES = [
     ("Kalshi", "Fed decision: rates unchanged", "macro"),
     ("Kalshi", "CPI print above consensus", "macro"),
@@ -39,6 +42,8 @@ MARKET_TEMPLATES = [
 READINESS_REQUIREMENTS = [
     {
         "requirement": "Paper trading has a statistically useful track record",
+        "status": "In progress",
+        "detail": "Signals and closed paper trades are now persisted to SQLite for review.",
         "status": "Not met",
         "detail": "No persistent backtest or multi-week paper-trading history exists yet.",
     },
@@ -73,6 +78,102 @@ READINESS_REQUIREMENTS = [
 st.set_page_config(page_title="Autonomous Money Agent", page_icon="🤖", layout="wide")
 
 
+def init_db() -> None:
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS paper_signals (
+                id TEXT PRIMARY KEY,
+                created_at TEXT NOT NULL,
+                platform TEXT NOT NULL,
+                market TEXT NOT NULL,
+                category TEXT NOT NULL,
+                side TEXT NOT NULL,
+                market_price REAL NOT NULL,
+                model_probability REAL NOT NULL,
+                edge REAL NOT NULL,
+                spread REAL NOT NULL,
+                liquidity REAL NOT NULL,
+                confidence REAL NOT NULL,
+                status TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                suggested_stake REAL NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS paper_trades (
+                id TEXT PRIMARY KEY,
+                closed_at TEXT NOT NULL,
+                platform TEXT NOT NULL,
+                market TEXT NOT NULL,
+                category TEXT NOT NULL,
+                side TEXT NOT NULL,
+                stake REAL NOT NULL,
+                pnl REAL NOT NULL,
+                roi REAL NOT NULL,
+                reason TEXT NOT NULL
+            )
+            """
+        )
+
+
+def save_signal(signal: dict) -> None:
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO paper_signals VALUES (
+                :id, :created_at, :platform, :market, :category, :side, :market_price,
+                :model_probability, :edge, :spread, :liquidity, :confidence, :status,
+                :reason, :suggested_stake
+            )
+            """,
+            {
+                **signal,
+                "created_at": signal["time"].isoformat(),
+                "suggested_stake": signal.get("suggested_stake", 0.0),
+            },
+        )
+
+
+def save_trade(trade: dict) -> None:
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO paper_trades VALUES (
+                :id, :closed_at, :platform, :market, :category, :side, :stake, :pnl, :roi, :reason
+            )
+            """,
+            {**trade, "closed_at": trade["closed_at"].isoformat()},
+        )
+
+
+def load_trade_history() -> pd.DataFrame:
+    with sqlite3.connect(DB_PATH) as conn:
+        return pd.read_sql_query(
+            "SELECT * FROM paper_trades ORDER BY closed_at DESC", conn
+        )
+
+
+def load_signal_history() -> pd.DataFrame:
+    with sqlite3.connect(DB_PATH) as conn:
+        return pd.read_sql_query(
+            "SELECT * FROM paper_signals ORDER BY created_at DESC LIMIT 500", conn
+        )
+
+
+def learning_biases() -> dict[tuple[str, str], float]:
+    history = load_trade_history()
+    if history.empty:
+        return {}
+    grouped = history.groupby(["platform", "category"])["roi"].mean().to_dict()
+    return {key: float(np.clip(value, -0.08, 0.08)) for key, value in grouped.items()}
+
+
+init_db()
+
+
 if "agent_running" not in st.session_state:
     st.session_state.agent_running = False
 if "cash" not in st.session_state:
@@ -93,6 +194,14 @@ if "loss_streak" not in st.session_state:
 
 def generate_signal() -> dict:
     platform, market, category = random.choice(MARKET_TEMPLATES)
+    learned_bias = learning_biases().get((platform, category), 0.0)
+    market_price = float(np.clip(np.random.normal(0.5, 0.16), 0.05, 0.95))
+    model_probability = float(
+        np.clip(
+            market_price + learned_bias + np.random.normal(0.045, 0.055),
+            0.02,
+            0.98,
+        )
     market_price = float(np.clip(np.random.normal(0.5, 0.16), 0.05, 0.95))
     model_probability = float(
         np.clip(market_price + np.random.normal(0.045, 0.055), 0.02, 0.98)
@@ -117,6 +226,7 @@ def generate_signal() -> dict:
         "spread": spread,
         "liquidity": liquidity,
         "confidence": confidence,
+        "learned_bias": learned_bias,
         "status": "new",
         "reason": "",
     }
@@ -133,6 +243,26 @@ def current_unrealized_pnl() -> float:
 def readiness_summary() -> tuple[int, int]:
     unmet = sum(1 for item in READINESS_REQUIREMENTS if item["status"] != "Met")
     return len(READINESS_REQUIREMENTS) - unmet, unmet
+
+
+def total_equity() -> float:
+    return st.session_state.cash + sum(
+        position["stake"] + position["unrealized_pnl"]
+        for position in st.session_state.positions
+        if position["status"] == "open"
+    )
+
+
+def daily_realized_pnl() -> float:
+    cutoff = datetime.now(timezone.utc) - timedelta(days=1)
+    return sum(trade["pnl"] for trade in st.session_state.trades if trade["closed_at"] >= cutoff)
+
+
+def evaluate_signal(signal: dict, risk: RiskConfig) -> tuple[bool, str, float]:
+    open_positions = [p for p in st.session_state.positions if p["status"] == "open"]
+    open_exposure = sum(p["stake"] for p in open_positions)
+    equity = total_equity()
+
 
 
 def total_equity() -> float:
@@ -195,6 +325,8 @@ def open_position(signal: dict, stake: float) -> None:
             "status": "open",
             "edge": signal["edge"],
             "confidence": signal["confidence"],
+            "category": signal["category"],
+            "holding_cycles": 0,
         }
     )
 
@@ -203,6 +335,7 @@ def mark_positions() -> None:
     for position in st.session_state.positions:
         if position["status"] != "open":
             continue
+        position["holding_cycles"] = position.get("holding_cycles", 0) + 1
         drift = position["edge"] * 0.12
         shock = float(np.random.normal(drift, 0.035))
         position["current_price"] = float(np.clip(position["current_price"] + shock, 0.01, 0.99))
@@ -217,6 +350,20 @@ def close_position(position: dict, reason: str) -> None:
     position["status"] = "closed"
     position["closed_at"] = datetime.now(timezone.utc)
     st.session_state.cash += position["stake"] + pnl
+    trade = {
+        "id": position["id"],
+        "platform": position["platform"],
+        "market": position["market"],
+        "side": position["side"],
+        "category": position["category"],
+        "stake": position["stake"],
+        "pnl": pnl,
+        "roi": pnl / position["stake"],
+        "reason": reason,
+        "closed_at": datetime.now(timezone.utc),
+    }
+    st.session_state.trades.append(trade)
+    save_trade(trade)
     st.session_state.trades.append(
         {
             "id": position["id"],
@@ -244,6 +391,7 @@ def autonomous_cycle(risk: RiskConfig, scans: int) -> None:
             close_position(position, "stop loss")
         elif roi >= 0.28:
             close_position(position, "take profit")
+        elif age_minutes >= 45 or position.get("holding_cycles", 0) >= 5:
         elif age_minutes >= 45:
             close_position(position, "max holding time")
 
@@ -254,6 +402,7 @@ def autonomous_cycle(risk: RiskConfig, scans: int) -> None:
         signal["reason"] = reason
         signal["suggested_stake"] = stake
         st.session_state.signals.append(signal)
+        save_signal(signal)
         if approved and st.session_state.agent_running:
             open_position(signal, stake)
 
@@ -264,6 +413,66 @@ st.title("🤖 Autonomous Money Agent Dashboard")
 st.caption(
     "Phase 3 control center with autonomous scanning, position sizing, risk limits, "
     "paper/live-mode separation, and P&L tracking. This app defaults to simulated execution."
+)
+
+ready_count, unmet_count = readiness_summary()
+if unmet_count:
+    st.error(
+        "Not ready for live trading. "
+        f"{unmet_count} of {len(READINESS_REQUIREMENTS)} launch requirements are unmet."
+    )
+else:
+    st.success("All launch requirements are marked met. Keep small capital limits enabled.")
+
+with st.sidebar:
+    st.header("Autonomous Controls")
+    mode = st.selectbox("Execution mode", ["Paper trading", "Live trading - guarded"], index=0)
+    if mode.startswith("Live"):
+        st.warning(
+            "Live mode is blocked until the readiness checklist is complete and "
+            "venue-specific order adapters are implemented."
+        )
+    st.session_state.agent_running = st.toggle("Agent running", value=st.session_state.agent_running)
+    scans = st.slider("Signals per cycle", min_value=1, max_value=25, value=8)
+    risk = RiskConfig(
+        starting_bankroll=10_000,
+        max_trade_size=st.number_input("Max trade size ($)", 1.0, 5_000.0, 75.0, 5.0),
+        max_daily_loss=st.number_input("Daily loss limit ($)", 1.0, 5_000.0, 250.0, 10.0),
+        max_open_positions=st.number_input("Max open positions", 1, 100, 12, 1),
+        max_total_exposure_pct=st.slider("Max portfolio exposure (%)", 1, 100, 25),
+        min_edge_pct=st.slider("Minimum model edge (%)", 0.1, 25.0, 4.0, 0.1),
+        max_spread_pct=st.slider("Maximum spread (%)", 0.1, 25.0, 5.0, 0.1),
+        min_liquidity=st.number_input("Minimum liquidity ($)", 0.0, 1_000_000.0, 2_500.0, 250.0),
+        stop_after_losses=st.number_input("Stop after consecutive losses", 1, 20, 4, 1),
+    )
+    if st.button("Run autonomous cycle", type="primary"):
+        autonomous_cycle(risk, scans)
+    if st.button("Reset session simulation"):
+        for key in ["trades", "signals", "positions"]:
+            st.session_state[key] = []
+        st.session_state.cash = risk.starting_bankroll
+        st.session_state.loss_streak = 0
+        st.session_state.equity = [{"time": datetime.now(timezone.utc), "equity": risk.starting_bankroll}]
+    if st.button("Clear paper-learning database"):
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.execute("DELETE FROM paper_signals")
+            conn.execute("DELETE FROM paper_trades")
+
+open_positions = [p for p in st.session_state.positions if p["status"] == "open"]
+realized_pnl = sum(t["pnl"] for t in st.session_state.trades)
+unrealized_pnl = current_unrealized_pnl()
+win_rate = (
+    sum(1 for t in st.session_state.trades if t["pnl"] > 0) / len(st.session_state.trades)
+    if st.session_state.trades
+    else 0
+)
+
+metric_cols = st.columns(6)
+metric_cols[0].metric(
+    "Total equity",
+    f"${total_equity():,.2f}",
+    f"${total_equity() - risk.starting_bankroll:,.2f}",
+)
 )
 
 ready_count, unmet_count = readiness_summary()
@@ -331,6 +540,16 @@ if not st.session_state.agent_running:
 if mode.startswith("Paper"):
     st.success("Paper mode is active. No real orders are being sent.")
 
+chart_tab, positions_tab, signals_tab, trades_tab, learning_tab, risk_tab, readiness_tab = st.tabs(
+    [
+        "Equity",
+        "Open Positions",
+        "Signals",
+        "Closed Trades",
+        "Learning",
+        "Risk Policy",
+        "Readiness",
+    ]
 chart_tab, positions_tab, signals_tab, trades_tab, risk_tab, readiness_tab = st.tabs(
     ["Equity", "Open Positions", "Signals", "Closed Trades", "Risk Policy", "Readiness"]
 )
@@ -342,6 +561,14 @@ with chart_tab:
             x=alt.X("time:T", title="Time"),
             y=alt.Y("equity:Q", title="Equity", scale=alt.Scale(zero=False)),
         )
+        st.altair_chart(chart, width="stretch")
+    else:
+        st.write("Run an autonomous cycle to build the equity curve.")
+
+with positions_tab:
+    if open_positions:
+        st.dataframe(pd.DataFrame(open_positions), width="stretch", hide_index=True)
+    else:
         st.altair_chart(chart, use_container_width=True)
     else:
         st.write("Run an autonomous cycle to build the equity curve.")
@@ -355,11 +582,46 @@ with positions_tab:
 with signals_tab:
     if st.session_state.signals:
         signals_df = pd.DataFrame(st.session_state.signals).sort_values("time", ascending=False)
+        st.dataframe(signals_df, width="stretch", hide_index=True)
         st.dataframe(signals_df, use_container_width=True, hide_index=True)
     else:
         st.write("No signals yet.")
 
 with trades_tab:
+    historical_trades = load_trade_history()
+    if not historical_trades.empty:
+        st.dataframe(historical_trades, width="stretch", hide_index=True)
+    else:
+        st.write("No closed paper trades yet.")
+
+with learning_tab:
+    historical_trades = load_trade_history()
+    historical_signals = load_signal_history()
+    st.subheader("Paper Learning Memory")
+    st.caption(
+        "Closed paper trades are persisted to SQLite and summarized by venue/category "
+        "so future simulated signals can apply a small learned probability bias."
+    )
+    if historical_trades.empty:
+        st.info("Run paper-trading cycles until positions close to build learning data.")
+    else:
+        learning_df = (
+            historical_trades.groupby(["platform", "category"])
+            .agg(
+                trades=("id", "count"),
+                win_rate=("pnl", lambda values: (values > 0).mean()),
+                avg_roi=("roi", "mean"),
+                total_pnl=("pnl", "sum"),
+            )
+            .reset_index()
+            .sort_values("total_pnl", ascending=False)
+        )
+        st.dataframe(learning_df, width="stretch", hide_index=True)
+    st.subheader("Recent Persisted Signals")
+    if historical_signals.empty:
+        st.write("No persisted signals yet.")
+    else:
+        st.dataframe(historical_signals, width="stretch", hide_index=True)
     if st.session_state.trades:
         trades_df = pd.DataFrame(st.session_state.trades).sort_values("closed_at", ascending=False)
         st.dataframe(trades_df, use_container_width=True, hide_index=True)
@@ -384,6 +646,7 @@ with readiness_tab:
     st.subheader("Live Trading Readiness")
     st.warning("Do not fund or enable autonomous live trading until every item is met.")
     readiness_df = pd.DataFrame(READINESS_REQUIREMENTS)
+    st.dataframe(readiness_df, width="stretch", hide_index=True)
     st.dataframe(readiness_df, use_container_width=True, hide_index=True)
     st.markdown(
         """
